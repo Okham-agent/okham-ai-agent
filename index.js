@@ -25,22 +25,27 @@ try {
   console.error('Failed to init AI:', e.message);
 }
 
-async function callGemini(prompt, history){
+async function callGemini(systemPrompt, history, userText){
   const apiKey = process.env.GEMINI_API_KEY;
   const model = 'gemini-1.5-flash';
-  // Build contents for Gemini
   const contents = [];
   for (const h of history.slice(-10)){
-    contents.push({role: h.role === 'assistant' ? 'model' : 'user', parts: [{text: h.content}]});
+    if (!h.content) continue;
+    contents.push({role: h.role === 'assistant' ? 'model' : 'user', parts: [{text: String(h.content).substring(0,2000)}]});
   }
-  contents.push({role:'user', parts:[{text: prompt}]});
+  contents.push({role:'user', parts:[{text: String(userText).substring(0,2000)}]});
   
   const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     contents,
-    systemInstruction: {parts: [{text: prompt.split('\n[USER]')[0]}]},
-    generationConfig: {temperature: 0.7, maxOutputTokens: 800}
+    systemInstruction: {parts: [{text: systemPrompt.substring(0,8000)}]},
+    generationConfig: {temperature: 0.7, maxOutputTokens: 1000}
   });
-  return res.data.candidates?.[0]?.content?.parts?.[0]?.text || 'ຂໍໂທດ ຕອບບໍ່ໄດ້ 🙏';
+  const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    console.error('Gemini empty response', JSON.stringify(res.data));
+    throw new Error('Gemini empty response');
+  }
+  return text;
 }
 
 // === CONFIG 4 PAGES IDs ===
@@ -81,8 +86,7 @@ ${masterPromptText}
   // Use Gemini if available (Free)
   if (process.env.GEMINI_API_KEY){
     try{
-      const fullPrompt = `${systemPrompt}\n[USER]: ${userText}`;
-      reply = await callGemini(fullPrompt, conv.history);
+      reply = await callGemini(systemPrompt, conv.history, userText);
     }catch(e){
       console.error('Gemini error', e.response?.data || e.message);
       // fallback to OpenAI if Gemini fails
