@@ -9,7 +9,16 @@ const app = express();
 app.use(bodyParser.json({limit: '20mb'}));
 app.use(require('cors')());
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openai = null;
+try {
+  if (process.env.OPENAI_API_KEY) {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  } else {
+    console.warn('WARNING: OPENAI_API_KEY not set - AI will not work until set');
+  }
+} catch(e){
+  console.error('Failed to init OpenAI:', e.message);
+}
 
 // === CONFIG 4 PAGES IDs ===
 const PAGES = {
@@ -50,6 +59,9 @@ ${masterPromptText}
     {role:'user', content: userText}
   ];
 
+  if (!openai){
+    throw new Error('OPENAI_API_KEY not configured');
+  }
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages,
