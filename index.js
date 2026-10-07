@@ -10,14 +10,37 @@ app.use(bodyParser.json({limit: '20mb'}));
 app.use(require('cors')());
 
 let openai = null;
+let useGemini = false;
 try {
+  if (process.env.GEMINI_API_KEY) {
+    useGemini = true;
+    console.log('Using Gemini API (Free) - Key found');
+  }
   if (process.env.OPENAI_API_KEY) {
     openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  } else {
-    console.warn('WARNING: OPENAI_API_KEY not set - AI will not work until set');
+  } else if (!useGemini) {
+    console.warn('WARNING: No AI Key set');
   }
 } catch(e){
-  console.error('Failed to init OpenAI:', e.message);
+  console.error('Failed to init AI:', e.message);
+}
+
+async function callGemini(prompt, history){
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model = 'gemini-1.5-flash';
+  // Build contents for Gemini
+  const contents = [];
+  for (const h of history.slice(-10)){
+    contents.push({role: h.role === 'assistant' ? 'model' : 'user', parts: [{text: h.content}]});
+  }
+  contents.push({role:'user', parts:[{text: prompt}]});
+  
+  const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    contents,
+    systemInstruction: {parts: [{text: prompt.split('\n[USER]')[0]}]},
+    generationConfig: {temperature: 0.7, maxOutputTokens: 800}
+  });
+  return res.data.candidates?.[0]?.content?.parts?.[0]?.text || 'ຂໍໂທດ ຕອບບໍ່ໄດ້ 🙏';
 }
 
 // === CONFIG 4 PAGES IDs ===
@@ -53,22 +76,49 @@ ${masterPromptText}
 - ห้ามสร้างราคาเอง ใช้ราคาจริงจากระบบ
 `;
 
-  const messages = [
-    {role:'system', content: systemPrompt},
-    ...conv.history,
-    {role:'user', content: userText}
-  ];
+  let reply = '';
 
-  if (!openai){
-    throw new Error('OPENAI_API_KEY not configured');
+  // Use Gemini if available (Free)
+  if (process.env.GEMINI_API_KEY){
+    try{
+      const fullPrompt = `${systemPrompt}\n[USER]: ${userText}`;
+      reply = await callGemini(fullPrompt, conv.history);
+    }catch(e){
+      console.error('Gemini error', e.response?.data || e.message);
+      // fallback to OpenAI if Gemini fails
+      if (openai){
+        const messages = [
+          {role:'system', content: systemPrompt},
+          ...conv.history,
+          {role:'user', content: userText}
+        ];
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages,
+          temperature: 0.7
+        });
+        reply = completion.choices[0].message.content;
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    if (!openai){
+      throw new Error('No AI Key configured');
+    }
+    const messages = [
+      {role:'system', content: systemPrompt},
+      ...conv.history,
+      {role:'user', content: userText}
+    ];
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0.7
+    });
+    reply = completion.choices[0].message.content;
   }
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages,
-    temperature: 0.7
-  });
 
-  const reply = completion.choices[0].message.content;
   conv.history.push({role:'user', content:userText});
   conv.history.push({role:'assistant', content:reply});
   if (conv.history.length > 20) conv.history = conv.history.slice(-20);
