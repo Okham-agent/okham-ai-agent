@@ -27,8 +27,7 @@ try {
 
 async function callGemini(systemPrompt, history, userText){
   const apiKey = process.env.GEMINI_API_KEY;
-  // Use v1 and gemini-2.0-flash which is free and stable in 2026
-  const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-latest'];
+  // Auto-discover available models first
   const contents = [];
   for (const h of history.slice(-10)){
     if (!h.content) continue;
@@ -36,10 +35,44 @@ async function callGemini(systemPrompt, history, userText){
   }
   contents.push({role:'user', parts:[{text: String(userText).substring(0,2000)}]});
   
+  // List from Google suggestion + 2025-2026 models
+  const modelsToTry = [
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-2.0-flash-lite',
+    'gemini-2.0-flash-exp',
+    'gemini-1.5-flash-8b',
+    'gemini-1.5-flash-8b-latest',
+    'gemini-2.0-flash-thinking-exp',
+    'gemini-3.8-flash', // as suggested by API error
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest'
+  ];
+
+  // Try to get real list from API
+  try {
+    const listRes = await axios.get(`https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`);
+    const available = listRes.data.models?.filter(m => m.supportedGenerationMethods?.includes('generateContent')).map(m => m.name.replace('models/','')) || [];
+    console.log('Available Gemini models:', available);
+    if (available.length > 0) {
+      // Prioritize flash models
+      const flashModels = available.filter(n => n.includes('flash'));
+      if (flashModels.length > 0) {
+        modelsToTry.unshift(...flashModels.slice(0,3));
+      } else {
+        modelsToTry.unshift(...available.slice(0,3));
+      }
+    }
+  } catch(e) {
+    console.error('ListModels failed:', e.message);
+  }
+
+  // Deduplicate
+  const uniqueModels = [...new Set(modelsToTry)];
+
   let lastError = null;
-  for (const model of modelsToTry){
+  for (const model of uniqueModels){
     try{
-      // Use v1 API (stable) not v1beta
       const res = await axios.post(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`, {
         contents,
         systemInstruction: {parts: [{text: systemPrompt.substring(0,8000)}]},
@@ -47,15 +80,15 @@ async function callGemini(systemPrompt, history, userText){
       });
       const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) {
-        console.error('Gemini empty response', JSON.stringify(res.data));
+        console.error(`Gemini ${model} empty`, JSON.stringify(res.data).substring(0,500));
         continue;
       }
       console.log(`Gemini success with model ${model}`);
       return text;
     }catch(e){
       lastError = e;
-      console.error(`Gemini model ${model} failed:`, e.response?.data?.error?.message || e.message);
-      // try next model
+      const msg = e.response?.data?.error?.message || e.message;
+      console.error(`Gemini model ${model} failed:`, msg.substring(0,300));
     }
   }
   throw lastError || new Error('All Gemini models failed');
