@@ -131,17 +131,66 @@ ${masterPromptText}
 }
 
 async function sendMessage(psid, token, text){
-  await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${token}`, {
-    recipient: {id: psid},
-    message: {text}
-  });
+  try {
+    console.log(`Sending to ${psid}: ${text.substring(0,50)}...`);
+    const res = await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${token}`, {
+      recipient: {id: psid},
+      message: {text}
+    });
+    console.log('Send success:', res.data.message_id);
+    return res.data;
+  } catch(e){
+    console.error('SendMessage FAILED:', e.response?.data || e.message);
+    throw e;
+  }
 }
 
 // Verify
 app.get('/webhook', (req,res)=>{
+  console.log('Webhook Verify attempt:', req.query['hub.verify_token']);
   if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN){
+    console.log('Verify SUCCESS');
     res.send(req.query['hub.challenge']);
-  } else res.sendStatus(403);
+  } else {
+    console.log('Verify FAILED - expected:', process.env.VERIFY_TOKEN);
+    res.sendStatus(403);
+  }
+});
+
+// DEBUG ENDPOINTS
+app.get('/debug', (req,res)=>{
+  res.json({
+    status: 'Okham AI Agent Running',
+    has_gemini: !!process.env.GEMINI_API_KEY,
+    has_openai: !!process.env.OPENAI_API_KEY,
+    has_page1: !!process.env.PAGE_ACCESS_TOKEN_PAGE1,
+    has_page2: !!process.env.PAGE_ACCESS_TOKEN_PAGE2,
+    has_verify: !!process.env.VERIFY_TOKEN,
+    verify_token: process.env.VERIFY_TOKEN || 'NOT SET',
+    pages: Object.keys(PAGES),
+    time: new Date().toISOString()
+  });
+});
+
+app.get('/test-gemini', async (req,res)=>{
+  try{
+    if (!process.env.GEMINI_API_KEY) return res.send('No GEMINI_API_KEY set');
+    const reply = await callGemini('You are helpful assistant', [], 'Say hello in Lao');
+    res.send('Gemini OK: ' + reply);
+  }catch(e){
+    res.send('Gemini FAILED: ' + (e.response?.data ? JSON.stringify(e.response.data) : e.message));
+  }
+});
+
+app.get('/test-page-token', async (req,res)=>{
+  const token = process.env.PAGE_ACCESS_TOKEN_PAGE1;
+  if (!token) return res.send('No PAGE_ACCESS_TOKEN_PAGE1');
+  try{
+    const r = await axios.get(`https://graph.facebook.com/v19.0/me?access_token=${token}`);
+    res.json({ok:true, page: r.data});
+  }catch(e){
+    res.json({ok:false, error: e.response?.data || e.message});
+  }
 });
 
 // Receive
