@@ -27,7 +27,8 @@ try {
 
 async function callGemini(systemPrompt, history, userText){
   const apiKey = process.env.GEMINI_API_KEY;
-  const model = 'gemini-1.5-flash';
+  // Use v1 and gemini-2.0-flash which is free and stable in 2026
+  const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-latest'];
   const contents = [];
   for (const h of history.slice(-10)){
     if (!h.content) continue;
@@ -35,17 +36,29 @@ async function callGemini(systemPrompt, history, userText){
   }
   contents.push({role:'user', parts:[{text: String(userText).substring(0,2000)}]});
   
-  const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-    contents,
-    systemInstruction: {parts: [{text: systemPrompt.substring(0,8000)}]},
-    generationConfig: {temperature: 0.7, maxOutputTokens: 1000}
-  });
-  const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    console.error('Gemini empty response', JSON.stringify(res.data));
-    throw new Error('Gemini empty response');
+  let lastError = null;
+  for (const model of modelsToTry){
+    try{
+      // Use v1 API (stable) not v1beta
+      const res = await axios.post(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`, {
+        contents,
+        systemInstruction: {parts: [{text: systemPrompt.substring(0,8000)}]},
+        generationConfig: {temperature: 0.7, maxOutputTokens: 1000}
+      });
+      const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        console.error('Gemini empty response', JSON.stringify(res.data));
+        continue;
+      }
+      console.log(`Gemini success with model ${model}`);
+      return text;
+    }catch(e){
+      lastError = e;
+      console.error(`Gemini model ${model} failed:`, e.response?.data?.error?.message || e.message);
+      // try next model
+    }
   }
-  return text;
+  throw lastError || new Error('All Gemini models failed');
 }
 
 // === CONFIG 4 PAGES IDs ===
