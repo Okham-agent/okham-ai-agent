@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -10,91 +11,84 @@ app.use(bodyParser.json({limit: '20mb'}));
 app.use(require('cors')());
 
 let openai = null;
-let useGemini = false;
 try {
-  if (process.env.GEMINI_API_KEY) {
-    useGemini = true;
-    console.log('Using Gemini API (Free) - Key found');
-  }
-  if (process.env.OPENAI_API_KEY) {
-    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  } else if (!useGemini) {
-    console.warn('WARNING: No AI Key set');
-  }
-} catch(e){
-  console.error('Failed to init AI:', e.message);
-}
+  if (process.env.GEMINI_API_KEY) console.log('Using Gemini API (Free) - Key found');
+  if (process.env.OPENAI_API_KEY) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+} catch(e){ console.error('Init error', e.message); }
 
 async function callGemini(systemPrompt, history, userText){
   const apiKey = process.env.GEMINI_API_KEY;
-  // Auto-discover available models first
   const contents = [];
-  for (const h of history.slice(-10)){
+  for (const h of history.slice(-6)){
     if (!h.content) continue;
-    contents.push({role: h.role === 'assistant' ? 'model' : 'user', parts: [{text: String(h.content).substring(0,2000)}]});
+    contents.push({role: h.role === 'assistant' ? 'model' : 'user', parts: [{text: String(h.content).substring(0,1500)}]});
   }
-  contents.push({role:'user', parts:[{text: String(userText).substring(0,2000)}]});
+  contents.push({role:'user', parts:[{text: String(userText).substring(0,1500)}]});
   
-  // List from Google suggestion + 2025-2026 models
   const modelsToTry = [
-    'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
-    'gemini-2.0-flash-lite',
-    'gemini-2.0-flash-exp',
-    'gemini-1.5-flash-8b',
-    'gemini-1.5-flash-8b-latest',
-    'gemini-2.0-flash-thinking-exp',
-    'gemini-3.8-flash', // as suggested by API error
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest'
+    'gemini-3.5-flash-lite',
+    'gemini-3.5-flash',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-2.5-flash',
+    'gemini-3.8-flash',
+    'gemini-2.5-pro',
   ];
 
-  // Try to get real list from API
   try {
     const listRes = await axios.get(`https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`);
     const available = listRes.data.models?.filter(m => m.supportedGenerationMethods?.includes('generateContent')).map(m => m.name.replace('models/','')) || [];
-    console.log('Available Gemini models:', available);
-    if (available.length > 0) {
-      // Prioritize flash models
-      const flashModels = available.filter(n => n.includes('flash'));
-      if (flashModels.length > 0) {
-        modelsToTry.unshift(...flashModels.slice(0,3));
-      } else {
-        modelsToTry.unshift(...available.slice(0,3));
-      }
-    }
-  } catch(e) {
-    console.error('ListModels failed:', e.message);
-  }
+    console.log('Available Gemini models:', available.slice(0,30));
+    const preferred = available.filter(n => n.includes('flash-lite') && !n.includes('image'));
+    if (preferred.length>0) modelsToTry.unshift(...preferred.slice(0,3));
+  } catch(e){ console.error('ListModels failed', e.message); }
 
-  // Deduplicate
-  const uniqueModels = [...new Set(modelsToTry)];
-
-  let lastError = null;
-  for (const model of uniqueModels){
+  const unique = [...new Set(modelsToTry)];
+  for (const model of unique){
     try{
+      console.log(`Trying Gemini model ${model}...`);
       const res = await axios.post(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`, {
         contents,
-        systemInstruction: {parts: [{text: systemPrompt.substring(0,8000)}]},
-        generationConfig: {temperature: 0.7, maxOutputTokens: 1000}
-      });
+        systemInstruction: {parts: [{text: systemPrompt.substring(0,6000)}]},
+        generationConfig: {temperature: 0.7, maxOutputTokens: 800}
+      }, {timeout: 20000});
       const text = res.data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) {
-        console.error(`Gemini ${model} empty`, JSON.stringify(res.data).substring(0,500));
-        continue;
-      }
-      console.log(`Gemini success with model ${model}`);
+      if (!text) continue;
+      console.log(`Gemini success with ${model}`);
       return text;
     }catch(e){
-      lastError = e;
       const msg = e.response?.data?.error?.message || e.message;
-      console.error(`Gemini model ${model} failed:`, msg.substring(0,300));
+      const code = e.response?.status;
+      console.error(`Model ${model} failed [${code}]: ${msg.substring(0,500)}`);
+      if (msg.includes('high demand') || msg.includes('overloaded') || code==503 || code==429){
+        await new Promise(r=>setTimeout(r, 3500));
+        try{
+          const res2 = await axios.post(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`, {
+            contents,
+            systemInstruction: {parts: [{text: systemPrompt.substring(0,6000)}]},
+            generationConfig: {temperature: 0.7, maxOutputTokens: 800}
+          }, {timeout:20000});
+          const t2 = res2.data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (t2){ console.log(`Retry success ${model}`); return t2; }
+        }catch(e2){ console.error(`Retry ${model} failed: ${e2.message}`); }
+      }
+      if (msg.includes('quota') || msg.includes('Quota')){
+        await new Promise(r=>setTimeout(r, 2000));
+      }
     }
   }
-  throw lastError || new Error('All Gemini models failed');
+  throw new Error('All Gemini models failed');
 }
 
-// === CONFIG 4 PAGES IDs ===
+function getFallbackReply(userText, lang){
+  const lower = userText.toLowerCase();
+  if (lower.includes('ລາຄາ') || lower.includes('ເທົ່າໃດ') || lower.includes('price') || lower.includes('nqi')){
+    return lang==='hmong' ? `Nyob zoo! Puaj Ginger 1 pob 120,000 kip, 2 pob 200,000 kip xa dawb! Koj xav tau pes tsawg? 🙏` : `ສະບາຍດີເຈົ້າ! 🙏\n\nປຸ໋ຍຂີງກີ່ງຄຳ:\n• 1 ຊອງ 120,000 ກີບ\n• 2 ຊອງ 200,000 ກີບ ສົ່ງຟຣີ!\n\nປຸ໋ຍນ້ຳກ້ວຍ: 2 ຂວດ 150,000 ກີບ\n\nສົນໃຈໂຕໃດເຈົ້າ?`;
+  }
+  return lang==='hmong' ? `Nyob zoo! Ua tsaug koj hu tuaj. Peb muaj puaj zoo heev. Koj xav paub dab tsi? 😊` : `ສະບາຍດີເຈົ້າ! 🙏 ຂອບໃຈທີ່ທັກມາຫາຮ້ານອົກຄຳ\n\nມີປຸ໋ຍຊີວະພາບກີ່ງຄຳ ປຸ໋ຍນ້ຳກ້ວຍ ປານີຢາງ ພ້ອມສົ່ງ!\n\nລູກຄ້າສົນໃຈໂຕໃດ? 😊`;
+}
+
 const PAGES = {
   '253869557819598': { name: 'ປຸ໋ຍຊີວະພາບກີ່ງຄຳ', token: process.env.PAGE_ACCESS_TOKEN_PAGE1, strategy: 'ALL_3_PRODUCTS' },
   '61559738783553':  { name: 'ປຸ໋ຍຊີວະພາບກີ່ງຄຳ', token: process.env.PAGE_ACCESS_TOKEN_PAGE1, strategy: 'ALL_3_PRODUCTS' },
@@ -115,141 +109,74 @@ async function callAI(psid, pageId, userText){
   const page = PAGES[pageId] || {name:'Okham', strategy:'ALL_3_PRODUCTS'};
   const conv = conversations.get(psid) || {history:[], pageId};
   const detectedLang = detectLanguage(userText);
-
-  const systemPrompt = `
-${masterPromptText}
-
-[CONTEXT]
-- Page: ${page.name} (ID: ${pageId}) Strategy: ${page.strategy}
-- ลูกค้าใช้ภาษา: ${detectedLang} -> ต้องตอบภาษานี้ (ลาว หรือ ม้ง)
-- ประวัติคุยล่าสุด: ${JSON.stringify(conv.history.slice(-6))}
-- กฎ COD: รับได้เฉพาะ อานุสิด & รุ่งอรุณ เท่านั้น ห้ามเกียงไก COD
-- ห้ามสร้างราคาเอง ใช้ราคาจริงจากระบบ
-`;
-
+  const systemPrompt = `${masterPromptText}\n[CONTEXT] Page: ${page.name} Lang:${detectedLang} History:${JSON.stringify(conv.history.slice(-4))}`;
   let reply = '';
-
-  // Use Gemini if available (Free)
+  let usedAI = false;
   if (process.env.GEMINI_API_KEY){
-    try{
-      reply = await callGemini(systemPrompt, conv.history, userText);
-    }catch(e){
-      console.error('Gemini error', e.response?.data || e.message);
-      // fallback to OpenAI if Gemini fails
-      if (openai){
-        const messages = [
-          {role:'system', content: systemPrompt},
-          ...conv.history,
-          {role:'user', content: userText}
-        ];
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages,
-          temperature: 0.7
-        });
-        reply = completion.choices[0].message.content;
-      } else {
-        throw e;
-      }
-    }
-  } else {
-    if (!openai){
-      throw new Error('No AI Key configured');
-    }
-    const messages = [
-      {role:'system', content: systemPrompt},
-      ...conv.history,
-      {role:'user', content: userText}
-    ];
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
-      temperature: 0.7
-    });
-    reply = completion.choices[0].message.content;
+    try{ reply = await callGemini(systemPrompt, conv.history, userText); usedAI = true; }
+    catch(e){ console.error('Gemini final fail', e.message); }
   }
-
+  if (!usedAI || !reply){
+    if (openai){
+      try{
+        const messages = [{role:'system', content: systemPrompt}, ...conv.history.slice(-6), {role:'user', content: userText}];
+        const c = await openai.chat.completions.create({model:"gpt-4o-mini", messages, temperature:0.7});
+        reply = c.choices[0].message.content; usedAI = true;
+      }catch(e2){ console.error('OpenAI fail', e2.message); }
+    }
+  }
+  if (!usedAI || !reply){
+    console.log('Using FALLBACK');
+    reply = getFallbackReply(userText, detectedLang);
+  }
   conv.history.push({role:'user', content:userText});
   conv.history.push({role:'assistant', content:reply});
-  if (conv.history.length > 20) conv.history = conv.history.slice(-20);
+  if (conv.history.length>12) conv.history = conv.history.slice(-12);
   conversations.set(psid, conv);
   return reply;
 }
 
 async function sendMessage(psid, token, text){
-  try {
-    console.log(`Sending to ${psid}: ${text.substring(0,50)}...`);
-    const res = await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${token}`, {
-      recipient: {id: psid},
-      message: {text}
-    });
-    console.log('Send success:', res.data.message_id);
-    return res.data;
-  } catch(e){
-    console.error('SendMessage FAILED:', e.response?.data || e.message);
-    throw e;
-  }
+  const res = await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${token}`, {
+    recipient:{id:psid}, message:{text: text.substring(0,1900)}
+  });
+  console.log('Send success', res.data.message_id);
+  return res.data;
 }
 
-// Verify
 app.get('/webhook', (req,res)=>{
-  console.log('Webhook Verify attempt:', req.query['hub.verify_token']);
-  if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN){
-    console.log('Verify SUCCESS');
-    res.send(req.query['hub.challenge']);
-  } else {
-    console.log('Verify FAILED - expected:', process.env.VERIFY_TOKEN);
-    res.sendStatus(403);
-  }
+  if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) res.send(req.query['hub.challenge']);
+  else res.sendStatus(403);
 });
 
-// DEBUG ENDPOINTS
-app.get('/debug', (req,res)=>{
-  res.json({
-    status: 'Okham AI Agent Running',
-    has_gemini: !!process.env.GEMINI_API_KEY,
-    has_openai: !!process.env.OPENAI_API_KEY,
-    has_page1: !!process.env.PAGE_ACCESS_TOKEN_PAGE1,
-    has_page2: !!process.env.PAGE_ACCESS_TOKEN_PAGE2,
-    has_verify: !!process.env.VERIFY_TOKEN,
-    verify_token: process.env.VERIFY_TOKEN || 'NOT SET',
-    pages: Object.keys(PAGES),
-    time: new Date().toISOString()
-  });
-});
+app.get('/debug', (req,res)=> res.json({
+  status:'Okham v4 Fixed',
+  has_gemini: !!process.env.GEMINI_API_KEY,
+  has_openai: !!process.env.OPENAI_API_KEY,
+  has_page1: !!process.env.PAGE_ACCESS_TOKEN_PAGE1,
+  has_page2: !!process.env.PAGE_ACCESS_TOKEN_PAGE2,
+  time: new Date().toISOString()
+}));
 
 app.get('/test-gemini', async (req,res)=>{
   try{
-    if (!process.env.GEMINI_API_KEY) return res.send('No GEMINI_API_KEY set');
-    const reply = await callGemini('You are helpful assistant', [], 'Say hello in Lao');
-    res.send('Gemini OK: ' + reply);
-  }catch(e){
-    res.send('Gemini FAILED: ' + (e.response?.data ? JSON.stringify(e.response.data) : e.message));
-  }
+    if (!process.env.GEMINI_API_KEY) return res.send('No GEMINI_API_KEY');
+    const r = await callGemini('You are helpful assistant, reply in Lao', [], 'ສະບາຍດີ');
+    res.send('Gemini OK: '+r);
+  }catch(e){ res.send('Gemini FAILED: '+(e.response?.data?JSON.stringify(e.response.data):e.message).substring(0,1500)); }
 });
 
-app.get('/test-page-token', async (req,res)=>{
-  const token = process.env.PAGE_ACCESS_TOKEN_PAGE1;
-  if (!token) return res.send('No PAGE_ACCESS_TOKEN_PAGE1');
-  try{
-    const r = await axios.get(`https://graph.facebook.com/v19.0/me?access_token=${token}`);
-    res.json({ok:true, page: r.data});
-  }catch(e){
-    res.json({ok:false, error: e.response?.data || e.message});
-  }
-});
-
-// Receive
 app.post('/webhook', async (req,res)=>{
   const body = req.body;
-  if (body.object === 'page'){
+  console.log('Webhook hit', JSON.stringify(body).substring(0,800));
+  if (body.object==='page'){
     for (const entry of body.entry){
       const pageId = entry.id;
       const pageConfig = PAGES[pageId];
-      if (!pageConfig || !pageConfig.token) continue;
-      for (const event of entry.messaging || []){
+      if (!pageConfig || !pageConfig.token){ console.log('No config for '+pageId); continue; }
+      for (const event of entry.messaging||[]){
         const psid = event.sender?.id;
-        if (!psid) continue;
+        if (!psid || psid===pageId) continue;
         if (event.message && event.message.text){
           const userText = event.message.text;
           console.log(`[${pageConfig.name} ${pageId}] ${psid}: ${userText}`);
@@ -258,7 +185,7 @@ app.post('/webhook', async (req,res)=>{
             await sendMessage(psid, pageConfig.token, reply);
           }catch(e){
             console.error('AI error', e.message);
-            await sendMessage(psid, pageConfig.token, 'ຂໍໂທດເດີ້ ລະບົບຂັດຂ້ອງໜ້ອຍໜຶ່ງ ລອງໃໝ່ອີກຄັ້ງ 🙏');
+            try{ await sendMessage(psid, pageConfig.token, getFallbackReply(userText, detectLanguage(userText))); }catch(e2){ console.error('Fallback send fail', e2.message); }
           }
         }
       }
@@ -267,7 +194,7 @@ app.post('/webhook', async (req,res)=>{
   } else res.sendStatus(404);
 });
 
-app.get('/', (req,res)=> res.send('Okham AI Agent Running - 4 Pages Ready'));
+app.get('/', (req,res)=> res.send('Okham AI Agent v4 - Gemini Fixed - Ready'));
 
 const port = process.env.PORT || 10000;
 app.listen(port, ()=> console.log('Webhook running on', port));
